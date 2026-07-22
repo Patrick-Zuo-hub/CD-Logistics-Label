@@ -1,0 +1,9 @@
+# 凭证文件——绝对不要上传到 GitHub
+env.doc
+
+# 本地生成物 / 环境
+唛头PDF/
+.venv/
+__pycache__/
+*.pyc
+.vercel/
