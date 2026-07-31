@@ -191,7 +191,8 @@ def fetch_pod(waybill, api_key, token):
     try:
         data = r.json()
     except ValueError:
-        return [], f"响应无法解析 (HTTP {r.status_code})"
+        snippet = (r.text or "")[:80].replace("\n", " ")
+        return [], f"查询不到（接口返回非JSON, HTTP {r.status_code}: {snippet}）"
     if data.get("code") not in (0, 200, "0", "200"):
         msg = data.get("msg", "")
         return [], f"查询失败{f'（{msg}）' if msg else ''}"
@@ -275,7 +276,14 @@ document.querySelectorAll('.job').forEach(form=>{
     btn.disabled=true;log.style.display='block';log.textContent='处理中，请稍候…';
     try{
       const r=await fetch('/process/'+kind,{method:'POST',body:new FormData(form)});
-      const d=await r.json();
+      const raw=await r.text();
+      let d;
+      try{d=JSON.parse(raw);}
+      catch(_){
+        log.innerHTML='<span class="err">✘ 服务器无响应或超时（HTTP '+r.status+'）。'+
+          '请减少单量后分批重试；若持续失败，可能是该单号接口异常。</span>';
+        btn.disabled=false;return;
+      }
       log.innerHTML=d.log.map(l=>{
         const cls=l.startsWith('✔')?'ok':(l.startsWith('✘')?'err':(l.startsWith('⚠')?'warn':''));
         return cls?`<span class="${cls}">${l}</span>`:l;
@@ -322,11 +330,14 @@ def _run(kind):
     ok, results, failed = 0, [], []
 
     for wb in waybills:
-        if kind == "mark":
-            pdf, err = fetch_mark(wb, api_key, secret)
-            items = [(f"{wb}.pdf", pdf)] if pdf else []
-        else:
-            items, err = fetch_pod(wb, api_key, secret)
+        try:
+            if kind == "mark":
+                pdf, err = fetch_mark(wb, api_key, secret)
+                items = [(f"{wb}.pdf", pdf)] if pdf else []
+            else:
+                items, err = fetch_pod(wb, api_key, secret)
+        except Exception as e:  # 单个单号异常不影响其他
+            items, err = [], f"处理异常: {type(e).__name__}: {e}"
         if items:
             for name, data in items:
                 if not IS_SERVERLESS:
@@ -352,20 +363,29 @@ def _run(kind):
     return jsonify(log=log, zip_b64=zip_b64)
 
 
+def _safe_run(kind):
+    """保证任何异常都以 JSON 返回，避免前端拿到非JSON的错误页"""
+    try:
+        return _run(kind)
+    except Exception as e:
+        return jsonify(log=[f"✘ 服务器处理出错: {type(e).__name__}: {e}",
+                            "（若为超时，请减少单量分批重试）"], zip_b64=None)
+
+
 @app.route("/process/mark", methods=["POST"])
 def process_mark():
-    return _run("mark")
+    return _safe_run("mark")
 
 
 @app.route("/process/pod", methods=["POST"])
 def process_pod():
-    return _run("pod")
+    return _safe_run("pod")
 
 
 # 兼容旧路径
 @app.route("/process", methods=["POST"])
 def process_legacy():
-    return _run("mark")
+    return _safe_run("mark")
 
 
 if __name__ == "__main__":
