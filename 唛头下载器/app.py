@@ -236,7 +236,11 @@ button:disabled{background:#aaa}
 .warn{color:#b45309}.ok{color:#15803d}.err{color:#b91c1c}
 .tip{background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:8px 12px;font-size:13px;color:#854d0e;margin:0 0 12px}
 a.dl{display:inline-block;margin-top:12px;color:#2563eb;font-weight:600}
-</style></head><body>
+.barwrap{display:none;height:8px;background:#e5e7eb;border-radius:6px;margin-top:14px;overflow:hidden}
+.bar{height:100%;width:0;background:#2563eb;transition:width .3s}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head><body>
 <h1>物流单据批量下载器</h1>
 {% if not has_creds %}<p class="tip">⚠️ 尚未配置凭证：请设置环境变量 CLIENT_ID / CLIENT_SECRET（部署平台）或填写 env.doc（本地）。</p>{% endif %}
 <div class="tabs">
@@ -244,13 +248,14 @@ a.dl{display:inline-block;margin-top:12px;color:#2563eb;font-weight:600}
   <div class="tab" data-t="pod" onclick="sw('pod')">下载 POD</div>
 </div>
 <div class="card">
-  <p class="tip">💡 建议每次查询单量小于 <b>60 单</b>；单量较大时请自行分批，以免请求超时。</p>
+  <p class="tip">💡 可一次上传/粘贴<b>全部单号</b>，系统会自动每 10 个一批查询，实时显示进度，最后汇总为一个 zip；单量再大也不会因单次响应过长而报错。</p>
   <form class="job" data-kind="mark">
     <p>方式一：上传含物流单号的 Excel（.xlsx）</p>
     <input type="file" name="file" accept=".xlsx,.xlsm">
     <p class="or">方式二：直接粘贴单号（换行、逗号或空格分隔均可）</p>
     <textarea name="text" placeholder="CD2607200276&#10;CD2607200277&#10;CD2607200279"></textarea>
     <br><button type="submit">开始下载唛头</button>
+    <div class="barwrap"><div class="bar"></div></div>
     <div class="log"></div>
   </form>
   <form class="job" data-kind="pod" style="display:none">
@@ -259,6 +264,7 @@ a.dl{display:inline-block;margin-top:12px;color:#2563eb;font-weight:600}
     <p class="or">方式二：直接粘贴单号（换行、逗号或空格分隔均可）</p>
     <textarea name="text" placeholder="CD2607200276&#10;CD2607200277"></textarea>
     <br><button type="submit">开始下载 POD</button>
+    <div class="barwrap"><div class="bar"></div></div>
     <div class="log"></div>
   </form>
 </div>
@@ -267,38 +273,66 @@ function sw(t){
   document.querySelectorAll('.tab').forEach(e=>e.classList.toggle('active',e.dataset.t===t));
   document.querySelectorAll('.job').forEach(f=>f.style.display=f.dataset.kind===t?'block':'none');
 }
+const BATCH_SIZE=10;
 document.querySelectorAll('.job').forEach(form=>{
-  const kind=form.dataset.kind, log=form.querySelector('.log'), btn=form.querySelector('button');
+  const kind=form.dataset.kind, log=form.querySelector('.log'), btn=form.querySelector('button'),
+        barwrap=form.querySelector('.barwrap'), bar=form.querySelector('.bar');
+  let lines=[];
+  const render=()=>{log.innerHTML=lines.map(l=>{
+    const cls=l.startsWith('✔')?'ok':(l.startsWith('✘')?'err':(l.startsWith('⚠')?'warn':''));
+    return cls?`<span class="${cls}">${l}</span>`:l;}).join('\\n');};
   form.addEventListener('submit',async e=>{
     e.preventDefault();
     const hasFile=form.file.files.length>0, hasText=form.text.value.trim().length>0;
     if(!hasFile&&!hasText){alert('请上传 Excel 或在文本框粘贴单号');return;}
-    btn.disabled=true;log.style.display='block';log.textContent='处理中，请稍候…';
+    btn.disabled=true;log.style.display='block';lines=['正在解析单号…'];render();
+    bar.style.width='0';barwrap.style.display='none';
     try{
-      const r=await fetch('/process/'+kind,{method:'POST',body:new FormData(form)});
-      const raw=await r.text();
-      let d;
-      try{d=JSON.parse(raw);}
-      catch(_){
-        log.innerHTML='<span class="err">✘ 服务器无响应或超时（HTTP '+r.status+'）。'+
-          '请减少单量后分批重试；若持续失败，可能是该单号接口异常。</span>';
-        btn.disabled=false;return;
+      // 1) 先解析出全部单号
+      const pr=await fetch('/parse',{method:'POST',body:new FormData(form)});
+      const pd=await pr.json();
+      const all=pd.waybills||[];
+      if(!all.length){lines=['✘ 未获取到任何物流单号'];render();btn.disabled=false;return;}
+      const total=all.length, batches=Math.ceil(total/BATCH_SIZE);
+      barwrap.style.display='block';
+      // 2) 每 BATCH_SIZE 个一批，顺序查询
+      let files=[], ok=0, failed=[];
+      lines=[`共 ${total} 单，分 ${batches} 批（每批 ${BATCH_SIZE} 个）查询…`];render();
+      for(let b=0;b<batches;b++){
+        const chunk=all.slice(b*BATCH_SIZE,(b+1)*BATCH_SIZE);
+        const fd=new FormData();fd.append('text',chunk.join('\\n'));
+        let d=null;
+        try{ d=JSON.parse(await (await fetch('/process/'+kind,{method:'POST',body:fd})).text()); }
+        catch(_){ chunk.forEach(w=>{failed.push(w);lines.push(`✘ ${w} 批次请求失败（可稍后重试）`);}); }
+        if(d){
+          (d.lines||[]).forEach(l=>lines.push(l));
+          (d.results||[]).forEach(f=>files.push(f));
+          ok+=d.ok||0;(d.failed||[]).forEach(w=>failed.push(w));
+        }
+        bar.style.width=Math.round((b+1)/batches*100)+'%';
+        lines[0]=`进度：${b+1}/${batches} 批完成，已成功 ${ok} 单`;
+        render();log.scrollTop=log.scrollHeight;
       }
-      log.innerHTML=d.log.map(l=>{
-        const cls=l.startsWith('✔')?'ok':(l.startsWith('✘')?'err':(l.startsWith('⚠')?'warn':''));
-        return cls?`<span class="${cls}">${l}</span>`:l;
-      }).join('\\n');
+      // 3) 汇总
+      lines.push(`\\n完成：成功 ${ok} / ${total}`);
+      if(failed.length)lines.push(`✘ 失败单号（${failed.length}个）: ${failed.join('、')}`);
+      render();
+      // 4) 生成下载：单文件直接下，多文件合并 zip
       const b64toBlob=(b64,mime)=>{const bin=atob(b64),arr=new Uint8Array(bin.length);
         for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return new Blob([arr],{type:mime});};
-      let blob=null,fname='',label='';
-      if(d.file_b64){blob=b64toBlob(d.file_b64,'application/octet-stream');fname=d.file_name;label='⬇️ 下载 '+d.file_name;}
-      else if(d.zip_b64){blob=b64toBlob(d.zip_b64,'application/zip');fname=(kind==='pod'?'POD':'唛头PDF')+'.zip';label='📦 下载全部 (zip)';}
-      if(blob){
+      if(files.length===1){
+        const a=document.createElement('a');a.href=URL.createObjectURL(b64toBlob(files[0].b64,'application/octet-stream'));
+        a.className='dl';a.download=files[0].name;a.textContent='⬇️ 下载 '+files[0].name;
+        log.appendChild(document.createElement('br'));log.appendChild(a);
+      }else if(files.length>1){
+        const zip=new JSZip();
+        files.forEach(f=>zip.file(f.name,f.b64,{base64:true}));
+        const blob=await zip.generateAsync({type:'blob'});
         const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.className='dl';
-        a.download=fname;a.textContent=label;
+        a.download=(kind==='pod'?'POD':'唛头PDF')+'.zip';a.textContent=`📦 下载全部（${files.length}个文件, zip）`;
         log.appendChild(document.createElement('br'));log.appendChild(a);
       }
-    }catch(err){log.textContent='出错: '+err;}
+    }catch(err){lines.push('出错: '+err);render();}
     btn.disabled=false;
   });
 });
@@ -311,25 +345,31 @@ def index():
     return render_template_string(PAGE, has_creds=bool(api_key and secret))
 
 
-def _run(kind):
-    api_key, secret = load_env()
-    log = []
-    if not (api_key and secret):
-        return jsonify(log=["✘ 未配置凭证：请设置环境变量 CLIENT_ID / CLIENT_SECRET（或本地 env.doc）"], zip_b64=None)
+@app.route("/parse", methods=["POST"])
+def parse():
+    """解析上传的Excel或文本框，返回全部单号列表（供前端分批）"""
     try:
         waybills = waybills_from_request()
     except Exception as e:
-        return jsonify(log=[f"✘ 单号解析失败: {e}"], zip_b64=None)
-    if not waybills:
-        return jsonify(log=["✘ 未获取到任何物流单号"], zip_b64=None)
-    log.append(f"共读取 {len(waybills)} 个单号")
-    if len(waybills) > 60:
-        log.append(f"⚠️ 本次 {len(waybills)} 单已超过建议上限（60单），若超时请分批（每批≤60单）重试")
+        return jsonify(waybills=[], error=str(e))
+    return jsonify(waybills=waybills)
+
+
+def _run(kind):
+    """处理一批单号，返回逐单日志 + 文件(base64)，由前端汇总。不在服务端打包zip。"""
+    api_key, secret = load_env()
+    if not (api_key and secret):
+        return jsonify(lines=["✘ 未配置凭证：请设置环境变量 CLIENT_ID / CLIENT_SECRET（或本地 env.doc）"],
+                       results=[], ok=0, failed=[])
+    try:
+        waybills = waybills_from_request()
+    except Exception as e:
+        return jsonify(lines=[f"✘ 单号解析失败: {e}"], results=[], ok=0, failed=[])
 
     out_dir = MARK_DIR if kind == "mark" else POD_DIR
     if not IS_SERVERLESS:
         out_dir.mkdir(exist_ok=True)
-    ok, results, failed = 0, [], []
+    lines, results, ok, failed = [], [], 0, []
 
     for wb in waybills:
         try:
@@ -344,31 +384,15 @@ def _run(kind):
             for name, data in items:
                 if not IS_SERVERLESS:
                     (out_dir / name).write_bytes(data)
-                results.append((name, data))
+                results.append({"name": name, "b64": base64.b64encode(data).decode()})
             cnt = f"（{len(items)}个附件）" if kind == "pod" and len(items) > 1 else ""
-            log.append(f"✔ {wb} 已下载{cnt}")
+            lines.append(f"✔ {wb} 已下载{cnt}")
             ok += 1
         else:
             failed.append(wb)
-            log.append(f"✘ {wb} {err}")
+            lines.append(f"✘ {wb} {err}")
 
-    log.append(f"\n完成：成功 {ok} / {len(waybills)}")
-    if failed:
-        log.append(f"✘ 失败单号（{len(failed)}个）: {'、'.join(failed)}")
-
-    # 只有一个文件 → 直接下载该文件；多个 → 打包 zip
-    if len(results) == 1:
-        name, data = results[0]
-        return jsonify(log=log, zip_b64=None,
-                       file_b64=base64.b64encode(data).decode(), file_name=name)
-    zip_b64 = None
-    if results:
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for name, data in results:
-                zf.writestr(name, data)
-        zip_b64 = base64.b64encode(buf.getvalue()).decode()
-    return jsonify(log=log, zip_b64=zip_b64, file_b64=None, file_name=None)
+    return jsonify(lines=lines, results=results, ok=ok, failed=failed)
 
 
 def _safe_run(kind):
@@ -376,8 +400,8 @@ def _safe_run(kind):
     try:
         return _run(kind)
     except Exception as e:
-        return jsonify(log=[f"✘ 服务器处理出错: {type(e).__name__}: {e}",
-                            "（若为超时，请减少单量分批重试）"], zip_b64=None)
+        return jsonify(lines=[f"✘ 服务器处理出错: {type(e).__name__}: {e}"],
+                       results=[], ok=0, failed=[])
 
 
 @app.route("/process/mark", methods=["POST"])
