@@ -284,7 +284,7 @@ a.dl{display:inline-block;margin-top:12px;color:#2563eb;font-weight:600}
   <div class="tab" data-t="pod" onclick="sw('pod')">下载 POD</div>
 </div>
 <div class="card">
-  <p class="tip">💡 可一次上传/粘贴<b>全部单号</b>，系统会自动每 10 个一批查询，实时显示进度，最后汇总为一个 zip；单量再大也不会因单次响应过长而报错。</p>
+  <p class="tip">💡 可一次上传/粘贴<b>全部单号</b>，系统会自动分批查询（每批 5 个），实时显示进度，最后汇总为一个 zip；单量再大也不会因单次响应过长而报错。</p>
   <form class="job" data-kind="mark">
     <p>方式一：上传含物流单号的 Excel（.xlsx）</p>
     <input type="file" name="file" accept=".xlsx,.xlsm">
@@ -309,7 +309,7 @@ function sw(t){
   document.querySelectorAll('.tab').forEach(e=>e.classList.toggle('active',e.dataset.t===t));
   document.querySelectorAll('.job').forEach(f=>f.style.display=f.dataset.kind===t?'block':'none');
 }
-const BATCH_SIZE=10;
+const BATCH_SIZE=5;
 document.querySelectorAll('.job').forEach(form=>{
   const kind=form.dataset.kind, log=form.querySelector('.log'), btn=form.querySelector('button'),
         barwrap=form.querySelector('.barwrap'), bar=form.querySelector('.bar');
