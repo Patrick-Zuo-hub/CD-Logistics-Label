@@ -288,12 +288,14 @@ document.querySelectorAll('.job').forEach(form=>{
         const cls=l.startsWith('✔')?'ok':(l.startsWith('✘')?'err':(l.startsWith('⚠')?'warn':''));
         return cls?`<span class="${cls}">${l}</span>`:l;
       }).join('\\n');
-      if(d.zip_b64){
-        const bin=atob(d.zip_b64),arr=new Uint8Array(bin.length);
-        for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
-        const url=URL.createObjectURL(new Blob([arr],{type:'application/zip'}));
-        const a=document.createElement('a');a.href=url;a.className='dl';
-        a.download=(kind==='pod'?'POD':'唛头PDF')+'.zip';a.textContent='📦 下载全部 (zip)';
+      const b64toBlob=(b64,mime)=>{const bin=atob(b64),arr=new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return new Blob([arr],{type:mime});};
+      let blob=null,fname='',label='';
+      if(d.file_b64){blob=b64toBlob(d.file_b64,'application/octet-stream');fname=d.file_name;label='⬇️ 下载 '+d.file_name;}
+      else if(d.zip_b64){blob=b64toBlob(d.zip_b64,'application/zip');fname=(kind==='pod'?'POD':'唛头PDF')+'.zip';label='📦 下载全部 (zip)';}
+      if(blob){
+        const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.className='dl';
+        a.download=fname;a.textContent=label;
         log.appendChild(document.createElement('br'));log.appendChild(a);
       }
     }catch(err){log.textContent='出错: '+err;}
@@ -353,6 +355,12 @@ def _run(kind):
     log.append(f"\n完成：成功 {ok} / {len(waybills)}")
     if failed:
         log.append(f"✘ 失败单号（{len(failed)}个）: {'、'.join(failed)}")
+
+    # 只有一个文件 → 直接下载该文件；多个 → 打包 zip
+    if len(results) == 1:
+        name, data = results[0]
+        return jsonify(log=log, zip_b64=None,
+                       file_b64=base64.b64encode(data).decode(), file_name=name)
     zip_b64 = None
     if results:
         buf = io.BytesIO()
@@ -360,7 +368,7 @@ def _run(kind):
             for name, data in results:
                 zf.writestr(name, data)
         zip_b64 = base64.b64encode(buf.getvalue()).decode()
-    return jsonify(log=log, zip_b64=zip_b64)
+    return jsonify(log=log, zip_b64=zip_b64, file_b64=None, file_name=None)
 
 
 def _safe_run(kind):
