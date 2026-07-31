@@ -76,20 +76,56 @@ def _dedup(nums):
     return out
 
 
+HEADER_KEYS = ("waybill_num", "单号", "运单", "跟踪号", "追踪号", "tracking")
+
+
+def _norm_cell(v):
+    """单元格值规范化：数值去掉多余的 .0，其余转字符串去空白"""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip()
+
+
 def waybills_from_excel(file_bytes):
+    """从Excel提取单号，兼容：表头不在首行/上方有合并大标题、竖向合并单元格、
+    单号列前有空列、数值型单号、无表头等情况。"""
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     ws = wb.active
-    rows = [[("" if c is None else str(c).strip()) for c in row]
-            for row in ws.iter_rows(values_only=True)]
+    # 合并单元格：openpyxl 只在左上角格保留值，其余为空——正好等于“一个单号算一次”，无需展开
+    rows = [[_norm_cell(c) for c in row] for row in ws.iter_rows(values_only=True)]
     wb.close()
     if not rows:
         return []
-    col, start = 0, 0
-    for i, h in enumerate(rows[0]):
-        if h.lower() == "waybill_num" or "单号" in h:
-            col, start = i, 1
-            break
-    return _dedup(row[col] for row in rows[start:] if col < len(row))
+
+    def score(vals):  # “像单号”的值个数（长度≥5，避免误选序号/短码列）
+        return sum(1 for v in vals if len(v) >= 5)
+
+    # 1) 前 8 行找所有疑似表头，并按“其数据列真的像单号”打分挑最佳
+    #    （可排除“…物流单号清单”这类含关键词的合并大标题误判）
+    candidates = []
+    for r in range(min(len(rows), 8)):
+        for i, h in enumerate(rows[r]):
+            if any(k in h.lower() for k in HEADER_KEYS):
+                vals = _dedup(row[i] for row in rows[r + 1:] if i < len(row))
+                candidates.append((score(vals), vals))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    if candidates and candidates[0][0] > 0:
+        return candidates[0][1]
+
+    # 2) 没有可靠表头 → 自动挑“最像单号”的一列
+    ncols = max((len(r) for r in rows), default=0)
+    best, best_score = [], 0
+    for c in range(ncols):
+        vals = _dedup(row[c] for row in rows if c < len(row))
+        if score(vals) > best_score:
+            best, best_score = vals, score(vals)
+    if best_score > 0:
+        return best
+
+    # 3) 兜底：返回任一表头候选（若有），否则空
+    return candidates[0][1] if candidates else []
 
 
 def waybills_from_text(text):
