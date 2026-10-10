@@ -13,6 +13,7 @@
 本地运行时额外把文件存到「唛头PDF」/「POD」文件夹。
 """
 import base64
+import binascii
 import io
 import os
 import re
@@ -26,7 +27,8 @@ from openpyxl import load_workbook
 
 BASE_DIR = Path(__file__).resolve().parent
 API_HOST = "http://api.ywcd56.com"
-MARK_URL = f"{API_HOST}/openapi/getOutMarkPdf"
+MARK_API_HOST = "http://newapi.ywcd56.com"
+MARK_URL = f"{MARK_API_HOST}/openapi/getOutMarkPdf"
 LOCUS_URL = f"{API_HOST}/openapi/getlocusinfo"
 MARK_DIR = BASE_DIR / "唛头PDF"
 POD_DIR = BASE_DIR / "POD"
@@ -167,7 +169,24 @@ def fetch_mark(waybill, api_key, token):
         path = data["data"].get("path")
     if not path:
         return None, "接口未返回PDF地址"
-    url = path if path.startswith("http") else API_HOST + ("" if path.startswith("/") else "/") + path
+    if not isinstance(path, str):
+        return None, "接口返回的PDF内容格式无效"
+    path = path.strip()
+    # 新接口可能直接在 path 中返回 Base64，而非需要再次下载的地址。
+    if path.startswith("data:") or path.startswith("JVBERi0"):
+        encoded = path
+        if path.startswith("data:"):
+            meta, sep, encoded = path.partition(",")
+            if not sep or ";base64" not in meta.lower():
+                return None, "接口返回的PDF内容格式无效"
+        try:
+            pdf = base64.b64decode(re.sub(r"\s+", "", encoded), validate=True)
+        except (ValueError, binascii.Error):
+            return None, "接口返回的PDF Base64无效"
+        if not pdf.startswith(b"%PDF"):
+            return None, "接口返回的Base64内容不是PDF"
+        return pdf, None
+    url = path if path.startswith("http") else MARK_API_HOST + ("" if path.startswith("/") else "/") + path
     try:
         pr = requests.get(url, headers={"x-api-key": api_key, "token": token}, timeout=60)
         pr.raise_for_status()
